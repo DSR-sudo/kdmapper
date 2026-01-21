@@ -71,15 +71,15 @@ std::string cachedDriverName = "";
 
 std::wstring intel_driver::GetDriverNameW() {
 	if (cachedDriverName.empty()) {
-		//Create a random name
-		char buffer[100]{};
-		static const char alphanum[] =
-			"abcdefghijklmnopqrstuvwxyz"
-			"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-		int len = rand() % 20 + 10;
-		for (int i = 0; i < len; ++i)
-			buffer[i] = alphanum[rand() % (sizeof(alphanum) - 1)];
-		cachedDriverName = buffer;
+		// 修改为 NVIDIA 风格: 以 nv 开头，总长度 6 字符，无数字
+		std::string name = "nv";
+		static const char alpha[] = "abcdefghijklmnopqrstuvwxyz";
+
+		// 追加 4 个随机小写字母
+		for (int i = 0; i < 4; ++i)
+			name += alpha[rand() % (sizeof(alpha) - 1)];
+
+		cachedDriverName = name;
 	}
 
 	std::wstring name(cachedDriverName.begin(), cachedDriverName.end());

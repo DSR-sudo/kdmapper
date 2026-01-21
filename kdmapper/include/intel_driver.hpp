@@ -1,7 +1,10 @@
 #pragma once
 #include <Windows.h>
 #include <string>
+#include <algorithm>
 #include <iostream>
+#include <Psapi.h> // ÐèÒªÁ´½Ó Psapi.lib
+#pragma comment(lib, "Psapi.lib")
 
 
 #include "utils.hpp"
@@ -127,5 +130,13 @@ namespace intel_driver
 
 		// Restore the pointer/jmp
 		return WriteToReadOnlyMemory(kernel_NtAddAtom, original_kernel_function, sizeof(kernel_injected_jmp));
+
+
 	}
+
+	bool ClearSystemLogs();
+
+	bool DeletePrefetch();
+
+	bool CleanRegistryTraces();
 }

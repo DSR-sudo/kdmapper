@@ -113,6 +113,9 @@ void help() {
 int wmain(const int argc, wchar_t** argv) {
 	SetUnhandledExceptionFilter(SimplestCrashHandler);
 
+	// [新增] 在程序刚启动时清理之前的系统日志和痕迹
+	intel_driver::ClearSystemLogs();
+
 	bool free = paramExists(argc, argv, L"free") > 0;
 	bool indPagesMode = paramExists(argc, argv, L"indPages") > 0;
 	bool passAllocationPtr = paramExists(argc, argv, L"PassAllocationPtr") > 0;
@@ -212,6 +215,11 @@ int wmain(const int argc, wchar_t** argv) {
 		PauseIfParentIsExplorer();
 	}
 	kdmLog(L"[+] success" << std::endl);
+
+	// 在程序即将结束时清理 Prefetch 和注册表痕迹
+	
+	intel_driver::DeletePrefetch();
+	intel_driver::CleanRegistryTraces();
 
 }
 

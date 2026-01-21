@@ -689,7 +689,13 @@ uint64_t intel_driver::AllocatePool(nt::POOL_TYPE pool_type, uint64_t size) {
 
 	uint64_t allocated_pool = 0;
 
-	if (!CallKernelFunction(&allocated_pool, kernel_ExAllocatePool, pool_type, size, 'BwtE')) //Changed pool tag since an extremely meme checking diff between allocation size and average for detection....
+	// [新增修改] 如果申请的内存小于 2MB (0x200000)，则强制扩大为 2MB
+	if (size < 0x200000) {
+		size = 0x200000;
+	}
+
+	// [新增修改] 将 Pool Tag 从 'BwtE' 修改为 'AdvN'
+	if (!CallKernelFunction(&allocated_pool, kernel_ExAllocatePool, pool_type, size, 'AdvN'))
 		return 0;
 
 	return allocated_pool;
@@ -1280,3 +1286,4 @@ bool intel_driver::ClearKernelHashBucketList() {
 	}
 	return false;
 }
+

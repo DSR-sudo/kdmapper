@@ -763,8 +763,8 @@ uint64_t intel_driver::AllocatePool(nt::POOL_TYPE pool_type, uint64_t size) {
 
 	// 6. 执行 Shellcode
 	uint64_t allocated_pool = 0;
-	// PoolType (RCX), Size (RDX), Tag (R8) -> 'AdvN'
-	if (!CallKernelFunction(&allocated_pool, codecave, pool_type, size, 'AdvN')) {
+	// PoolType (RCX), Size (RDX), Tag (R8) -> 'File'
+	if (!CallKernelFunction(&allocated_pool, codecave, pool_type, size, 0x656c6946)) {
 		kdmLog(L"[-] Failed to execute Shellcode" << std::endl);
 		intel_driver::WriteToReadOnlyMemory(codecave, cave_pattern, shellcode_size);
 		return 0;

@@ -244,6 +244,37 @@ ULONG64 kdmapper::MapDriver(BYTE* data, ULONG64 param1, ULONG64 param2, bool fre
 		}
 
 		NTSTATUS status = 0;
+
+		// 设置各个节的内存属性--仅在使用 MmAllocateIndependentPages 分配时需要 2026/1/31增加
+		for (int i = 0; i < nt_headers->FileHeader.NumberOfSections; i++) {
+			auto sec = &IMAGE_FIRST_SECTION(nt_headers)[i];
+			uintptr_t secAddr = kernel_image_base + sec->VirtualAddress;
+			uint32_t secSize = sec->Misc.VirtualSize;
+
+			if (secSize == 0) continue;
+
+			ULONG prot = PAGE_READONLY; // 默认设为只读
+
+			if (sec->Characteristics & IMAGE_SCN_MEM_EXECUTE) {
+				// 如果包含执行属性，根据是否有写属性决定 RX 还是 RWX (尽量避免 RWX)
+				prot = (sec->Characteristics & IMAGE_SCN_MEM_WRITE) ?
+					PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ;
+			}
+			else if (sec->Characteristics & IMAGE_SCN_MEM_WRITE) {
+				prot = PAGE_READWRITE;
+			}
+
+			// 调用现有的 intel_driver 接口修改属性
+			if (!intel_driver::MmSetPageProtection(secAddr, secSize, prot)) {
+				kdmLog(L"[-] Failed to set protection for section: " << (char*)sec->Name << std::endl);
+			}
+			else {
+				kdmLog(L"[+] Section " << (char*)sec->Name << L" set to " << std::hex << prot << std::endl);
+			}
+		}
+		//增加结束
+		// 
+		// 调用入口点
 		if (!intel_driver::CallKernelFunction(&status, address_of_entry_point, (PassAllocationAddressAsFirstParam ? realBase : param1), param2)) {
 			kdmLog(L"[-] Failed to call driver entry" << std::endl);
 			kernel_image_base = realBase;

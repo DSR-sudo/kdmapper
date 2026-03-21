@@ -1142,7 +1142,7 @@ bool intel_driver::ClearKernelHashBucketList() {
 	}
 
 	auto g_HashCacheLockOffset = KDSymbolsHandler::GetInstance()->GetOffset(L"g_HashCacheLock");
-	if (!g_KernelHashBucketListOffset)
+	if (!g_HashCacheLockOffset)
 	{
 		kdmLog(L"[-] Can't Find g_HashCacheLock Offset" << std::endl);
 		return false;
